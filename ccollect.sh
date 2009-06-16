@@ -154,7 +154,6 @@ no_sources=0
 #
 WE=""
 ALL=""
-VERBOSE=""
 NO_MORE_ARGS=""
 while [ "$#" -ge 1 ]; do
    eval arg=\"\$1\"; shift
@@ -171,7 +170,7 @@ while [ "$#" -ge 1 ]; do
             ALL=1
             ;;
          -v|--verbose)
-            VERBOSE=1
+            set -x
             ;;
          -p|--parallel)
             PARALLEL=1
@@ -194,13 +193,6 @@ done
 
 # also export number of sources
 export no_sources
-
-#
-# be really, really, really verbose
-#
-if [ "${VERBOSE}" = 1 ]; then
-   set -x
-fi
 
 #
 # Look, if we should take ALL sources
@@ -307,11 +299,6 @@ while [ "${i}" -lt "${no_sources}" ]; do
    # Times
    #
    begin_s=$(date +%s)
-
-   #
-   # unset possible options
-   #
-   VERBOSE=""
 
    _techo "Beginning to backup"
 
