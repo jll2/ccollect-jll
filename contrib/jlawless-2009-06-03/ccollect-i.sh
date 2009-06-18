@@ -20,9 +20,6 @@
 # Initially written for SyGroup (www.sygroup.ch)
 # Date: Mon Nov 14 11:45:11 CET 2005
 
-# Error upon expanding unset variables:
-set -u
-
 #
 # Standard variables (stolen from cconf)
 #
@@ -45,14 +42,15 @@ RELEASE="2009-02-02"
 HALF_VERSION="ccollect ${VERSION}"
 FULL_VERSION="ccollect ${VERSION} (${RELEASE})"
 
+#TSORT="tc" ; NEWER="cnewer"
+TSORT="t" ; NEWER="newer"
+
 #
 # CDATE: how we use it for naming of the archives
 # DDATE: how the user should see it in our output (DISPLAY)
-# TSORT: how to sort: tc = ctime, t = mtime
 #
 CDATE="date +%Y%m%d-%H%M"
 DDATE="date +%Y-%m-%d-%H:%M:%S"
-TSORT="tc"
 
 #
 # unset parallel execution
@@ -128,6 +126,60 @@ usage()
 }
 
 #
+# Select interval if AUTO
+#
+# For this to work nicely, you have to choose interval names that sort nicely
+# such as int1, int2, int3 or a_daily, b_weekly, c_monthly, etc.
+#
+auto_interval()
+{
+   if [ -d "${backup}/intervals" -a -n "$(ls "${backup}/intervals" 2>/dev/null)" ] ; then
+      intervals_dir="${backup}/intervals"
+   elif [ -d "${CDEFAULTS}/intervals" -a -n "$(ls "${CDEFAULTS}/intervals" 2>/dev/null)" ] ; then
+      intervals_dir="${CDEFAULTS}/intervals"
+   else
+      _exit_err "No intervals are defined.  Skipping."
+   fi
+   echo intervals_dir=${intervals_dir}
+
+   trial_interval="$(ls -1r "${intervals_dir}/" | head -n 1)" || \
+      _exit_err "Failed to list contents of ${intervals_dir}/."
+   _techo "Considering interval ${trial_interval}"
+   most_recent="$(pcmd ls -${TSORT}p1 "${ddir}" | grep "^${trial_interval}.*/$" | head -n 1)" || \
+      _exit_err "Failed to list contents of ${ddir}/."
+   _techo "   Most recent ${trial_interval}: '${most_recent}'"
+   if [ -n "${most_recent}" ]; then
+       no_intervals="$(ls -1 "${intervals_dir}/" | wc -l)"
+       n=1
+       while [ "${n}" -le "${no_intervals}" ]; do
+          trial_interval="$(ls -p1 "${intervals_dir}/" | tail -n+${n} | head -n 1)"
+          _techo "Considering interval '${trial_interval}'"
+          c_interval="$(cat "${intervals_dir}/${trial_interval}" 2>/dev/null)"
+          m=$((${n}+1))
+          set --  "${ddir}" -maxdepth 1
+          while [ "${m}" -le "${no_intervals}" ]; do
+             interval_m="$(ls -1 "${intervals_dir}/" | tail -n+${m} | head -n 1)"
+             most_recent="$(pcmd ls -${TSORT}p1 "${ddir}" | grep "^${interval_m}\..*/$" | head -n 1)"
+             _techo "   Most recent ${interval_m}: '${most_recent}'"
+             if [ -n "${most_recent}" ] ; then
+                set -- "$@" -$NEWER "${ddir}/${most_recent}"
+             fi
+             m=$((${m}+1))
+          done
+          count=$(pcmd find "$@" -iname "${trial_interval}*" | wc -l)
+          _techo "   Found $count more recent backups of ${trial_interval} (limit: ${c_interval})"
+          if [ "$count" -lt "${c_interval}" ] ; then
+             break
+          fi
+          n=$((${n}+1))
+       done
+   fi
+   export INTERVAL="${trial_interval}"
+   D_FILE_INTERVAL="${intervals_dir}/${INTERVAL}"
+   D_INTERVAL=$(cat "${D_FILE_INTERVAL}" 2>/dev/null)
+}
+
+#
 # need at least interval and one source or --all
 #
 if [ $# -lt 2 ]; then
@@ -152,11 +204,8 @@ i=1
 no_sources=0
 
 #
-# Capture options and create source "array"
+# Create source "array"
 #
-WE=""
-ALL=""
-NO_MORE_ARGS=""
 while [ "$#" -ge 1 ]; do
    eval arg=\"\$1\"; shift
 
@@ -172,7 +221,7 @@ while [ "$#" -ge 1 ]; do
             ALL=1
             ;;
          -v|--verbose)
-            set -x
+            VERBOSE=1
             ;;
          -p|--parallel)
             PARALLEL=1
@@ -195,6 +244,13 @@ done
 
 # also export number of sources
 export no_sources
+
+#
+# be really, really, really verbose
+#
+if [ "${VERBOSE}" = 1 ]; then
+   set -x
+fi
 
 #
 # Look, if we should take ALL sources
@@ -284,8 +340,7 @@ while [ "${i}" -lt "${no_sources}" ]; do
    c_dest="${backup}/destination"
    c_pre_exec="${backup}/pre_exec"
    c_post_exec="${backup}/post_exec"
-   for opt in exclude verbose very_verbose rsync_options summary delete_incomplete \
-         remote_host rsync_failure_codes ; do
+   for opt in exclude verbose very_verbose rsync_options summary delete_incomplete remote_host ; do
       if [ -f "${backup}/$opt" -o -f "${backup}/no_$opt"  ]; then
          eval c_$opt=\"${backup}/$opt\"
       else
@@ -302,6 +357,12 @@ while [ "${i}" -lt "${no_sources}" ]; do
    # Times
    #
    begin_s=$(date +%s)
+
+   #
+   # unset possible options
+   #
+   VERBOSE=""
+   VVERBOSE=""
 
    _techo "Beginning to backup"
 
@@ -334,8 +395,24 @@ while [ "${i}" -lt "${no_sources}" ]; do
    fi
 
    #
+   # Destination is a path
+   #
+   if [ ! -f "${c_dest}" ]; then
+      _exit_err "Destination ${c_dest} is not a file. Skipping."
+   else
+      ddir=$(cat "${c_dest}"); ret="$?"
+      if [ "${ret}" -ne 0 ]; then
+         _exit_err "Destination ${c_dest} is not readable. Skipping."
+      fi
+   fi
+
+   #
    # interval definition: First try source specific, fallback to default
    #
+   if [ "${INTERVAL}" = "AUTO" ] ; then
+      auto_interval
+      _techo "Selected interval: '$INTERVAL'"
+   fi
    c_interval="$(cat "${backup}/intervals/${INTERVAL}" 2>/dev/null)"
 
    if [ -z "${c_interval}" ]; then
@@ -359,23 +436,6 @@ while [ "${i}" -lt "${no_sources}" ]; do
    fi
    # Verify source is up and accepting connections before deleting any old backups
    rsync "$source" >/dev/null || _exit_err "Source ${source} is not readable. Skipping."
-
-   #
-   # Verify source is up and accepting connections before deleting any old backups
-   #
-   rsync "${source}" >/dev/null || _exit_err "Source ${source} is not readable. Skipping."
-
-   #
-   # Destination is a path
-   #
-   if [ ! -f "${c_dest}" ]; then
-      _exit_err "Destination ${c_dest} is not a file. Skipping."
-   else
-      ddir=$(cat "${c_dest}"); ret="$?"
-      if [ "${ret}" -ne 0 ]; then
-         _exit_err "Destination ${c_dest} is not readable. Skipping."
-      fi
-   fi
 
    #
    # do we backup to a remote host? then set pre-cmd
@@ -426,12 +486,10 @@ while [ "${i}" -lt "${no_sources}" ]; do
    fi
 
    #
-   # Verbosity for rsync, rm, and mkdir
+   # Verbosity for rsync
    #
-   VVERBOSE=""
    if [ -f "${c_very_verbose}" ]; then
       set -- "$@" "-vv"
-      VVERBOSE="-v"
    elif [ -f "${c_verbose}" ]; then
       set -- "$@" "-v"
    fi
@@ -498,9 +556,9 @@ while [ "${i}" -lt "${no_sources}" ]; do
    #
    # Check for backup directory to clone from: Always clone from the latest one!
    #
-   # Use ls -1c instead of -1t, because last modification maybe the same on all
-   # and metadate update (-c) is updated by rsync locally.
-   #
+   # Depending on your file system, you may want to sort on: 
+   #   1. mtime (modification time) with TSORT=t, or
+   #   2. ctime (last change time, usually) with TSORT=tc
    last_dir="$(pcmd ls -${TSORT}p1 "${ddir}" | grep '/$' | head -n 1)" || \
       _exit_err "Failed to list contents of ${ddir}."
    
@@ -533,37 +591,22 @@ while [ "${i}" -lt "${no_sources}" ]; do
    #
    # the rsync part
    #
-
    _techo "Transferring files..."
    rsync "$@" "${source}" "${destination_full}"; ret=$?
-   _techo "Finished backup (rsync return code: $ret)."
+   # Correct the modification time:
+   pcmd touch "${destination_dir}"
 
    #
-   # Check if rsync exit code indicates failure.
+   # remove marking here
    #
-   fail=""
-   if [ -f "$c_rsync_failure_codes" ]; then
-      while read line ; do
-         line="${line%% }"
-         if [ -n "$line" ]; then
-            for code in $line ; do
-               [ "$ret" -eq "$code" ] && fail=1
-            done
-         fi
-      done <"$c_rsync_failure_codes"
-   fi
-
-   #
-   # If rsync exit code OK, remove marking.  If exit code non-zero, issue warning.
-   #
-   if [ -n "$fail" ]; then
-      _techo "Warning: rsync failed with return code $ret."
-   else
+   if [ "$ret" -ne 12 ] ; then
       pcmd rm "${destination_dir}.${c_marker}" || \
          _exit_err "Removing ${destination_dir}/${c_marker} failed."
-      if [ "${ret}" -ne 0 ]; then
-         _techo "Warning: rsync exited non-zero, the backup may be broken (see rsync errors)."
-      fi
+   fi
+
+   _techo "Finished backup (rsync return code: $ret)."
+   if [ "${ret}" -ne 0 ]; then
+      _techo "Warning: rsync exited non-zero, the backup may be broken (see rsync errors)."
    fi
 
    #
@@ -616,3 +659,5 @@ fi
 
 rm -f "${TMP}"
 _techo "Finished ${WE}"
+
+# vim: set shiftwidth=3 tabstop=3 expandtab :
